@@ -1,0 +1,9 @@
+.env
+.env.example
+
+AGENTS.md
+implementation.md
+PROJECT_PLAN.md
+
+outputs/
+TERM-PAPER/
