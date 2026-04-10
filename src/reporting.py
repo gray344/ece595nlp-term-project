@@ -6,6 +6,18 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 SYSTEM_ORDER = ["direct", "pedagogical", "act_conditioned"]
+DIFFICULTY_ORDER = ["easy", "medium", "hard", "deep"]
+
+
+def normalize_leakage(value: object) -> str:
+    text = str(value).strip().lower()
+    if text in {"none", "decisive_step", "full_answer"}:
+        return text
+    if text in {"0", ""}:
+        return "none"
+    if text == "1":
+        return "decisive_step"
+    return text
 
 
 def preview(text: str | None, limit: int = 120) -> str:
@@ -32,7 +44,16 @@ def aggregate(records: list[dict]) -> dict:
     if not records:
         return {}
 
-    leakage_rate = sum(item["judgment"]["leakage"] for item in records) / len(records)
+    leakage_counts = Counter(normalize_leakage(item["judgment"].get("leakage", "none")) for item in records)
+    leakage_rate = (
+        (leakage_counts.get("decisive_step", 0) + leakage_counts.get("full_answer", 0)) / len(records)
+    )
+    decisive_step_rate = leakage_counts.get("decisive_step", 0) / len(records)
+    full_answer_rate = leakage_counts.get("full_answer", 0) / len(records)
+    pedagogy_raw_mean = sum(
+        item["judgment"].get("pedagogy_raw_mean", item["judgment"].get("pedagogy_mean", 0.0))
+        for item in records
+    ) / len(records)
     pedagogy_mean = sum(item["judgment"]["pedagogy_mean"] for item in records) / len(records)
     correctness_mean = sum(item["judgment"]["correctness"] for item in records) / len(records)
     act_counts = Counter(
@@ -48,6 +69,10 @@ def aggregate(records: list[dict]) -> dict:
     return {
         "count": len(records),
         "leakage_rate": leakage_rate,
+        "decisive_step_rate": decisive_step_rate,
+        "full_answer_rate": full_answer_rate,
+        "leakage_counts": dict(leakage_counts),
+        "pedagogy_raw_mean": pedagogy_raw_mean,
         "pedagogy_mean": pedagogy_mean,
         "correctness_mean": correctness_mean,
         "act_counts": dict(act_counts),
@@ -83,6 +108,14 @@ def ordered_system_names(system_names: list[str] | set[str] | dict[str, dict]) -
     return sorted(names, key=lambda name: (priority.get(name, len(priority)), name))
 
 
+def ordered_difficulty_names(
+    difficulty_names: list[str] | set[str] | dict[str, dict],
+) -> list[str]:
+    names = list(difficulty_names)
+    priority = {name: index for index, name in enumerate(DIFFICULTY_ORDER)}
+    return sorted(names, key=lambda name: (priority.get(name, len(priority)), name))
+
+
 def system_summary_lines(system_summaries: dict[str, dict]) -> list[str]:
     lines: list[str] = []
     for system_name in ordered_system_names(system_summaries):
@@ -91,8 +124,9 @@ def system_summary_lines(system_summaries: dict[str, dict]) -> list[str]:
         act_match_text = f"{act_match:.2%}" if act_match is not None else "-"
         lines.append(
             f"{system_name:<15} n={summary['count']:<3} "
-            f"leakage={summary['leakage_rate']:.2%} "
-            f"pedagogy={summary['pedagogy_mean']:.2f} "
+            f"leaks(any/step/full)={summary['leakage_rate']:.2%}/"
+            f"{summary['decisive_step_rate']:.2%}/{summary['full_answer_rate']:.2%} "
+            f"pedagogy(raw/capped)={summary['pedagogy_raw_mean']:.2f}/{summary['pedagogy_mean']:.2f} "
             f"correctness={summary['correctness_mean']:.2f} "
             f"act_match={act_match_text}"
         )
@@ -146,7 +180,11 @@ def select_examples(
 ) -> dict[str, list[dict]]:
     filtered = [record for record in records if record["system"] == system_name]
     ordered = sorted(filtered, key=lambda item: item["judgment"]["pedagogy_mean"], reverse=True)
-    leakage_cases = [record for record in filtered if record["judgment"]["leakage"] == 1]
+    leakage_cases = [
+        record
+        for record in filtered
+        if normalize_leakage(record["judgment"].get("leakage", "none")) != "none"
+    ]
     return {
         "best": ordered[:top_k],
         "worst": list(reversed(ordered[-top_k:])) if ordered else [],
@@ -166,8 +204,9 @@ def render_example(record: dict) -> str:
         f"(run={run_id}, rep={repetition_index}, "
         f"difficulty={record.get('difficulty')}, topic={record.get('topic')}, "
         f"state={record.get('student_state')}, ideal={record.get('ideal_move')}, "
-        f"selected={selected_act}, pedagogy={record['judgment']['pedagogy_mean']:.2f}, "
-        f"leakage={record['judgment']['leakage']})\n"
+        f"selected={selected_act}, pedagogy_raw={record['judgment'].get('pedagogy_raw_mean', record['judgment']['pedagogy_mean']):.2f}, "
+        f"pedagogy_capped={record['judgment']['pedagogy_mean']:.2f}, "
+        f"leakage={normalize_leakage(record['judgment'].get('leakage', 'none'))})\n"
         f"  problem: {problem}\n"
         f"  student: {student_attempt}\n"
         f"  response: {response}\n"
@@ -177,11 +216,27 @@ def render_example(record: dict) -> str:
 
 def score_bundle_text(judgment: dict) -> str:
     pedagogy_raw_mean = judgment.get("pedagogy_raw_mean", "")
+    scaffolding = judgment.get("scaffolding", "")
+    scaffolding_capped = judgment.get("scaffolding_capped", "")
+    self_correction_support = judgment.get("self_correction_support", "")
+    self_correction_support_capped = judgment.get("self_correction_support_capped", "")
+    scaffolding_text = (
+        f"{scaffolding}->{scaffolding_capped}"
+        if scaffolding != "" and scaffolding_capped != "" and scaffolding != scaffolding_capped
+        else str(scaffolding)
+    )
+    self_correction_text = (
+        f"{self_correction_support}->{self_correction_support_capped}"
+        if self_correction_support != ""
+        and self_correction_support_capped != ""
+        and self_correction_support != self_correction_support_capped
+        else str(self_correction_support)
+    )
     return (
         f"leakage={judgment.get('leakage', '')}; "
         f"correctness={judgment.get('correctness', '')}; "
-        f"scaffolding={judgment.get('scaffolding', '')}; "
-        f"self_correction_support={judgment.get('self_correction_support', '')}; "
+        f"scaffolding={scaffolding_text}; "
+        f"self_correction_support={self_correction_text}; "
         f"non_overload={judgment.get('non_overload', '')}; "
         f"tone={judgment.get('tone', '')}; "
         f"pedagogy_raw_mean={pedagogy_raw_mean}; "
@@ -214,10 +269,12 @@ def table_rows(records: list[dict]) -> list[dict]:
                 "teacher_response": record.get("response", ""),
                 "judge_reasoning": judgment.get("reasoning", judgment.get("summary", "")),
                 "judge_summary": judgment.get("summary", ""),
-                "leakage": judgment.get("leakage", ""),
+                "leakage": normalize_leakage(judgment.get("leakage", "")),
                 "correctness": judgment.get("correctness", ""),
                 "scaffolding": judgment.get("scaffolding", ""),
+                "scaffolding_capped": judgment.get("scaffolding_capped", ""),
                 "self_correction_support": judgment.get("self_correction_support", ""),
+                "self_correction_support_capped": judgment.get("self_correction_support_capped", ""),
                 "non_overload": judgment.get("non_overload", ""),
                 "tone": judgment.get("tone", ""),
                 "pedagogy_raw_mean": judgment.get("pedagogy_raw_mean", ""),
@@ -264,7 +321,9 @@ def write_csv_table(records: list[dict], output_path: str | Path) -> Path:
         "leakage",
         "correctness",
         "scaffolding",
+        "scaffolding_capped",
         "self_correction_support",
+        "self_correction_support_capped",
         "non_overload",
         "tone",
         "pedagogy_raw_mean",
@@ -282,7 +341,7 @@ def write_csv_table(records: list[dict], output_path: str | Path) -> Path:
 def difficulty_summary_rows(records: list[dict]) -> list[dict]:
     rows: list[dict] = []
     by_difficulty = summarize_by_system_and_difficulty(records)
-    for difficulty in sorted(by_difficulty):
+    for difficulty in ordered_difficulty_names(by_difficulty):
         for system_name in ordered_system_names(by_difficulty[difficulty]):
             summary = by_difficulty[difficulty][system_name]
             act_match = summary.get("act_match_rate")
@@ -292,6 +351,9 @@ def difficulty_summary_rows(records: list[dict]) -> list[dict]:
                     "system": system_name,
                     "count": summary["count"],
                     "leakage_rate": summary["leakage_rate"],
+                    "decisive_step_rate": summary["decisive_step_rate"],
+                    "full_answer_rate": summary["full_answer_rate"],
+                    "pedagogy_raw_mean": summary["pedagogy_raw_mean"],
                     "pedagogy_mean": summary["pedagogy_mean"],
                     "correctness_mean": summary["correctness_mean"],
                     "act_match_rate": act_match if act_match is not None else "",
@@ -308,6 +370,9 @@ def write_difficulty_summary_csv(records: list[dict], output_path: str | Path) -
         "system",
         "count",
         "leakage_rate",
+        "decisive_step_rate",
+        "full_answer_rate",
+        "pedagogy_raw_mean",
         "pedagogy_mean",
         "correctness_mean",
         "act_match_rate",
@@ -356,7 +421,9 @@ def write_markdown_table(records: list[dict], output_path: str | Path) -> Path:
             "leakage": row["leakage"],
             "correctness": row["correctness"],
             "scaffolding": row["scaffolding"],
+            "scaffolding_capped": row["scaffolding_capped"],
             "self_correction_support": row["self_correction_support"],
+            "self_correction_support_capped": row["self_correction_support_capped"],
             "non_overload": row["non_overload"],
             "tone": row["tone"],
             "pedagogy_raw_mean": row["pedagogy_raw_mean"],
@@ -399,30 +466,33 @@ def write_markdown_report(records: list[dict], output_path: str | Path) -> Path:
     lines: list[str] = ["# Evaluation Report", ""]
     lines.append("## System Summary")
     lines.append("")
-    lines.append("| System | N | Leakage | Pedagogy | Correctness | Act Match |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+    lines.append("| System | N | Leak Any | Leak Step | Leak Full | Ped Raw | Ped Capped | Correctness | Act Match |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for system_name in ordered_system_names(summaries):
         summary = summaries[system_name]
         act_match = summary.get("act_match_rate")
         act_match_text = f"{act_match:.2%}" if act_match is not None else "-"
         lines.append(
             f"| {system_name} | {summary['count']} | {summary['leakage_rate']:.2%} | "
-            f"{summary['pedagogy_mean']:.2f} | {summary['correctness_mean']:.2f} | {act_match_text} |"
+            f"{summary['decisive_step_rate']:.2%} | {summary['full_answer_rate']:.2%} | "
+            f"{summary['pedagogy_raw_mean']:.2f} | {summary['pedagogy_mean']:.2f} | "
+            f"{summary['correctness_mean']:.2f} | {act_match_text} |"
         )
     lines.append("")
     lines.append("## System Summary by Difficulty")
     lines.append("")
-    lines.append("| Difficulty | System | N | Leakage | Pedagogy | Correctness | Act Match |")
-    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
-    for difficulty in sorted(difficulty_summaries):
+    lines.append("| Difficulty | System | N | Leak Any | Leak Step | Leak Full | Ped Raw | Ped Capped | Correctness | Act Match |")
+    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for difficulty in ordered_difficulty_names(difficulty_summaries):
         for system_name in ordered_system_names(difficulty_summaries[difficulty]):
             summary = difficulty_summaries[difficulty][system_name]
             act_match = summary.get("act_match_rate")
             act_match_text = f"{act_match:.2%}" if act_match is not None else "-"
             lines.append(
                 f"| {difficulty} | {system_name} | {summary['count']} | "
-                f"{summary['leakage_rate']:.2%} | {summary['pedagogy_mean']:.2f} | "
-                f"{summary['correctness_mean']:.2f} | {act_match_text} |"
+                f"{summary['leakage_rate']:.2%} | {summary['decisive_step_rate']:.2%} | "
+                f"{summary['full_answer_rate']:.2%} | {summary['pedagogy_raw_mean']:.2f} | "
+                f"{summary['pedagogy_mean']:.2f} | {summary['correctness_mean']:.2f} | {act_match_text} |"
             )
     lines.append("")
     scenario_index: dict[str, dict] = {}
@@ -435,7 +505,10 @@ def write_markdown_report(records: list[dict], output_path: str | Path) -> Path:
     lines.append("")
     lines.append(
         "- Difficulty counts: "
-        + ", ".join(f"{name}={dataset_difficulties[name]}" for name in sorted(dataset_difficulties))
+        + ", ".join(
+            f"{name}={dataset_difficulties[name]}"
+            for name in ordered_difficulty_names(dataset_difficulties)
+        )
     )
     run_ids = sorted({record.get("run_id", "latest") for record in records})
     repetition_count = len(

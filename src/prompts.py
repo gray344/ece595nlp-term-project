@@ -19,6 +19,7 @@ TUTOR_ACTS: dict[str, str] = {
 }
 
 ScoreValue = Literal[1, 2, 3, 4, 5]
+LeakageLevel = Literal["none", "decisive_step", "full_answer"]
 
 BASE_TUTOR_ROLE = dedent(
     """
@@ -36,12 +37,11 @@ PEDAGOGICAL_POLICY = dedent(
     """
 ).strip()
 
-PEDAGOGICAL_RESPONSE_SHAPE = dedent(
+TUTOR_RESPONSE_SHAPE = dedent(
     """
     Default response shape:
-    - 1 to 3 short sentences.
+    - 1 to 5 short sentences.
     - Ask at most 2 questions.
-    - Do not write a full worked solution for this problem.
     """
 ).strip()
 
@@ -57,32 +57,53 @@ def render_leakage_policy() -> str:
     return "\n".join(f"- {rule}" for rule in SHARED_LEAKAGE_POLICY_RULES)
 
 
+def render_generation_leakage_policy() -> str:
+    return dedent(
+        """
+        Leakage guardrails:
+        - Do not reveal the final answer.
+        - Do not write a full worked solution for this problem.
+        - Do not write a fully instantiated equation or a full calculation using this problem's numbers.
+        - If the student is blocked on choosing the next operation or step, ask about the relationship, goal, missing quantity, or quantity change instead of naming the operation directly.
+        - If you explain a concept, keep it general first and do not immediately plug in this problem's numbers or carry out the decisive next calculation.
+        """
+    ).strip()
+
+
 def render_state_guidance(include_student_state: bool) -> str:
     if include_student_state:
         return (
-            "A student_state label will be provided. Use it as a strong cue, "
+            "A student_state label will be provided. Use it as a cue, "
             "but stay grounded in the actual student attempt and dialogue context."
         )
-    return (
-        "No student_state label will be provided. Infer the student's current barrier "
-        "from the student attempt and dialogue context."
-    )
+    return "Stay grounded in the student's attempt and dialogue context."
 
 
 def build_act_selection_guidance(include_student_state: bool) -> str:
     state_guidance = (
-        "- A student_state label is provided; use it as a strong cue, but confirm it against the attempt and dialogue context."
+        "- A student_state label is provided; you can use it as a cue to where the student is struggling, but confirm it against the attempt and dialogue context."
         if include_student_state
-        else "- No student_state label is provided. Infer whether the student is mainly stuck, wrong_step, or partially_correct from the attempt and dialogue context before choosing an act."
+        else "- Use the student's attempt and dialogue context to infer what kind of help is needed next."
+    )
+    barrier_guidance = (
+        """
+        - If the student is or seems wrong_step, prefer locate_error or prompt_self_correction; use explain_concept only when the error comes from a missing rule or formula.
+        - If the student is or seems stuck, prefer ask_subproblem or give_hint; use explain_concept only when the student explicitly lacks the underlying concept.
+        - If the student is or seems partially_correct, prefer prompt_self_correction or check_understanding.
+        """
+        if include_student_state
+        else """
+        - If the student's work contains a clear mistake, prefer locate_error or prompt_self_correction; use explain_concept only when the issue seems to come from a missing rule or formula.
+        - If the student seems blocked on the next move, prefer ask_subproblem or give_hint; use explain_concept only when the underlying concept itself appears to be missing.
+        - If the student's approach is mostly on track, prefer prompt_self_correction or check_understanding.
+        """
     )
     return dedent(
         f"""
         Selection guidance:
         {state_guidance}
         - Start with the least revealing move that can resolve the student's current barrier.
-        - If the student is or seems wrong_step, prefer locate_error or prompt_self_correction; use explain_concept only when the error comes from a missing rule or formula.
-        - If the student is or seems stuck, prefer ask_subproblem or give_hint; use explain_concept only when the student explicitly lacks the underlying concept.
-        - If the student is or seems partially_correct, prefer prompt_self_correction or check_understanding.
+        {barrier_guidance.strip()}
         - Choose give_direct_answer only when a non-revealing move would no longer be useful.
 
         Act distinctions:
@@ -101,44 +122,43 @@ ACT_REALIZATION_RULES: dict[str, str] = {
     "ask_subproblem": dedent(
         """
         Ask one tightly focused smaller question about a prerequisite relationship, quantity, or micro-step.
-        You may ask one brief follow-up only if it is part of the same micro-step.
-        If the student's unresolved obstacle is choosing an operation, do not name that operation.
-        Do not write the full equation or calculation.
+        Keep the student's attention on one manageable sub-step.
+        You may ask one brief follow-up only if it stays on that same micro-step.
         """
     ).strip(),
     "give_hint": dedent(
         """
-        Give one nudge, cue, representation, or partial setup that keeps meaningful work with the student.
-        If the student's unresolved obstacle is choosing an operation, do not name that operation directly.
-        Do not write the decisive equation or calculation with the problem's numbers.
+        Give one nudge, cue, representation, or partial setup that helps the student see what to examine next.
+        Keep the hint concrete and tied to the student's current attempt.
+        Leave meaningful work for the student to carry out.
         """
     ).strip(),
     "locate_error": dedent(
         """
         Name the specific mistaken step, omission, or assumption in the student's current work.
         After naming the error, redirect the student to repair that step themselves.
-        Do not replace the student's step with the corrected calculation or corrected numeric step.
+        Keep the feedback local to the error that matters most right now.
         """
     ).strip(),
     "prompt_self_correction": dedent(
         """
         Explicitly ask the student to recheck or revise their own prior step or answer.
-        Reference what they should inspect, but do not provide the corrected step.
-        If the student's unresolved obstacle is choosing an operation, do not name that operation directly.
+        Point them to the part of their reasoning that deserves another look.
+        Make the request specific enough that they know what to inspect.
         """
     ).strip(),
     "explain_concept": dedent(
         """
-        Briefly explain the needed rule or formula in general language or with placeholders when possible.
+        Briefly explain the needed rule or formula in general language.
+        Connect it to the relationship or quantity structure that matters here.
         After the explanation, ask the student to apply it to this problem.
-        Avoid plugging in the problem's numbers in sequence or carrying out the decisive next calculation.
         """
     ).strip(),
     "check_understanding": dedent(
         """
         Ask the student to justify, verify, or restate reasoning they already have.
-        Do not introduce a new method unless the current reasoning is unsalvageable.
-        If the student's unresolved obstacle is choosing an operation, do not name that operation directly.
+        Use this when their current approach seems plausible and you want them to articulate why it works.
+        Keep the focus on the reasoning they already started.
         """
     ).strip(),
     "give_direct_answer": dedent(
@@ -163,14 +183,20 @@ JUDGE_RUBRIC = dedent(
     Shared leakage policy:
     {leakage_policy}
 
-    Leakage:
-    - 0: The response follows the shared leakage policy and preserves meaningful work for the student.
-    - 1: The response violates the shared leakage policy and removes the need for the student to determine the next substantive step.
+    Leakage levels:
+    - none: The response follows the shared leakage policy and preserves meaningful work for the student.
+    - decisive_step: The response reveals the key operation, equation setup, substitution, formula instantiation, or other decisive next step, but does not give the final answer or a near-complete worked solution.
+    - full_answer: The response gives the final answer, a near-complete worked solution, or enough solved computation that little meaningful work remains for the student.
 
-    Scoring constraints when leakage = 1:
-    - Scaffolding cannot exceed 3.
-    - Self-correction support cannot exceed 3.
-    - The response should not be treated as pedagogically excellent overall.
+    Scoring constraints when leakage = decisive_step:
+    - Scaffolding cannot exceed 4.
+    - Self-correction support cannot exceed 4.
+    - The response should not be treated as top-tier pedagogy overall.
+
+    Scoring constraints when leakage = full_answer:
+    - Scaffolding cannot exceed 2.
+    - Self-correction support cannot exceed 2.
+    - The response should not be treated as pedagogically strong overall.
 
     Correctness (1-5):
     - 5: Mathematically correct, instructionally sound, and aligned with the student's current work.
@@ -199,7 +225,7 @@ JUDGE_RUBRIC = dedent(
 
     In the reasoning field, write 3 to 6 short sentences total.
     Keep the full reasoning under 120 words.
-    Briefly justify the important scores with concrete evidence from the tutor response and explicitly mention any leakage trigger.
+    Briefly justify the important scores with concrete evidence from the tutor response and explicitly mention the leakage level and trigger when leakage is not none.
     Keep the summary to one short sentence.
     """
 ).strip().format(leakage_policy=render_leakage_policy())
@@ -219,7 +245,7 @@ class ActSelectionOutput(BaseModel):
 
 
 class JudgeResponseOutput(BaseModel):
-    leakage: Literal[0, 1]
+    leakage: LeakageLevel
     correctness: ScoreValue
     scaffolding: ScoreValue
     self_correction_support: ScoreValue
@@ -264,10 +290,11 @@ def build_baseline_prompt(
     system_parts = [
         BASE_TUTOR_ROLE,
         render_state_guidance(include_student_state),
-        "Shared leakage policy:\n" + render_leakage_policy(),
+        TUTOR_RESPONSE_SHAPE,
     ]
     if pedagogical:
-        system_parts.extend([PEDAGOGICAL_POLICY, PEDAGOGICAL_RESPONSE_SHAPE])
+        system_parts.append(PEDAGOGICAL_POLICY)
+        system_parts.append(render_generation_leakage_policy())
 
     system_prompt = "\n\n".join(system_parts)
     user_prompt = f"{render_scenario_input(scenario, include_student_state)}\n\nWrite the next tutor response only."
@@ -311,24 +338,16 @@ def build_response_prompt(
 ) -> tuple[str, str]:
     act_description = TUTOR_ACTS[selected_act]
     act_rules = ACT_REALIZATION_RULES[selected_act]
-    direct_answer_override = ""
-    if selected_act == "give_direct_answer":
-        direct_answer_override = (
-            "\nBecause the assigned act is give_direct_answer, you may override the shared leakage "
-            "policy and provide the answer or decisive next step directly if needed. This will still "
-            "count as leakage under the evaluation rubric."
-        )
     system_prompt = "\n\n".join(
         [
             BASE_TUTOR_ROLE,
             render_state_guidance(include_student_state),
             PEDAGOGICAL_POLICY,
-            PEDAGOGICAL_RESPONSE_SHAPE,
-            "Shared leakage policy:\n" + render_leakage_policy(),
+            TUTOR_RESPONSE_SHAPE,
+            render_generation_leakage_policy(),
             f"Your assigned pedagogical move is: {selected_act}\nAct definition: {act_description}",
             "Follow the assigned act closely.\n" + act_rules,
-            "Keep the response concise and targeted.\nDo not mention the act label in your answer."
-            + direct_answer_override,
+            "Keep the response concise and targeted.\nDo not mention the act label in your answer.",
         ]
     )
 
@@ -336,14 +355,18 @@ def build_response_prompt(
     return system_prompt, user_prompt
 
 
-def build_judge_prompt(scenario: Scenario, response: str) -> tuple[str, str]:
+def build_judge_prompt(
+    scenario: Scenario,
+    response: str,
+    include_student_state: bool = True,
+) -> tuple[str, str]:
     system_prompt = dedent(
         """
         You are grading a tutoring response for pedagogical quality.
         Apply the rubric strictly and consistently.
         Enforce the leakage constraints in the rubric.
         Return valid JSON with keys:
-        - leakage: 0 or 1
+        - leakage: one of none, decisive_step, full_answer
         - correctness: integer 1 to 5
         - scaffolding: integer 1 to 5
         - self_correction_support: integer 1 to 5
@@ -354,29 +377,37 @@ def build_judge_prompt(scenario: Scenario, response: str) -> tuple[str, str]:
         """
     ).strip()
 
-    user_prompt = dedent(
-        f"""
-        Problem:
-        {scenario.problem}
-
-        Correct answer:
-        {scenario.correct_answer}
-
-        Student state: {scenario.student_state}
-
-        Student attempt:
-        {scenario.student_attempt}
-
-        Dialogue context:
-        {format_context(scenario.dialogue_context)}
-
-        Tutor response:
-        {response}
-
-        Rubric:
-        {JUDGE_RUBRIC}
-
-        Judge whether the response leaks too much of the answer and score its pedagogical quality.
-        """
-    ).strip()
+    user_lines = [
+        "Problem:",
+        scenario.problem,
+        "",
+        "Correct answer:",
+        scenario.correct_answer,
+        "",
+        "Student attempt:",
+        scenario.student_attempt,
+        "",
+    ]
+    if include_student_state:
+        user_lines.extend(
+            [
+                f"Student state: {scenario.student_state}",
+                "",
+            ]
+        )
+    user_lines.extend(
+        [
+            "Dialogue context:",
+            format_context(scenario.dialogue_context),
+            "",
+            "Tutor response:",
+            response,
+            "",
+            "Rubric:",
+            JUDGE_RUBRIC,
+            "",
+            "Judge whether the response leaks too much of the answer and score its pedagogical quality.",
+        ]
+    )
+    user_prompt = "\n".join(user_lines)
     return system_prompt, user_prompt

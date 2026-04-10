@@ -97,7 +97,8 @@ def print_record_summary(record: dict) -> None:
     print(
         "  scores        : "
         f"leakage={judgment['leakage']} "
-        f"pedagogy={judgment['pedagogy_mean']:.2f} "
+        f"pedagogy_raw={judgment['pedagogy_raw_mean']:.2f} "
+        f"pedagogy_capped={judgment['pedagogy_mean']:.2f} "
         f"correctness={judgment['correctness']} "
         f"scaffolding={judgment['scaffolding']} "
         f"self_correction={judgment['self_correction_support']}",

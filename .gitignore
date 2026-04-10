@@ -8,5 +8,7 @@ PROJECT_PLAN.md
 outputs/
 TERM-PAPER/
 src/__pycache__
+__pycache__/
+.git/
 
 .pyc*
