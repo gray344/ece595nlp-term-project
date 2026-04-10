@@ -89,6 +89,5 @@ If you want to use your own scenario set, create a JSONL file with that schema a
 ## Common Issues
 - `OPENAI_API_KEY is not set`: copy `.env.example` to `.env` and add your key.
 - `ImportError` for `openai` or `dotenv`: activate the virtual environment and run `pip install -r requirements.txt`.
-- `openai.PermissionDeniedError: Error code: 403`: your API key's project likely does not have access to one of the configured models. The default suspect is `JUDGE_MODEL=gpt-5-mini`; if needed, switch it to a model your project can access, such as `gpt-4.1-mini-2025-04-14`.
 - Slow or expensive runs: lower `--limit`, lower `--repetitions`, or reduce `MAX_CONCURRENCY`.
 - Debug logs interleave: this is expected when concurrency is greater than `1`; use `--concurrency 1` for cleaner step-by-step logs.

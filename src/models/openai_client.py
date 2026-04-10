@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any
 
-from openai import AsyncOpenAI, OpenAI, PermissionDeniedError
+from openai import AsyncOpenAI, AuthenticationError, OpenAI, PermissionDeniedError
 from pydantic import BaseModel, ValidationError
 
 from src.reporting import preview
@@ -54,7 +54,7 @@ class OpenAITextClient:
             print(message, flush=True)
 
     @staticmethod
-    def _permission_error_detail(exc: PermissionDeniedError) -> str:
+    def _access_error_detail(exc: AuthenticationError | PermissionDeniedError) -> str:
         body = getattr(exc, "body", None)
         if isinstance(body, dict):
             error = body.get("error")
@@ -64,19 +64,32 @@ class OpenAITextClient:
                     return str(message).strip()
         return str(exc).strip()
 
-    def _raise_permission_denied(
+    def _raise_access_error(
         self,
         *,
         label: str,
         model: str,
-        exc: PermissionDeniedError,
+        exc: AuthenticationError | PermissionDeniedError,
     ) -> None:
-        detail = self._permission_error_detail(exc)
+        detail = self._access_error_detail(exc)
         hints = [
-            f"OpenAI returned HTTP 403 for {label} using model '{model}'.",
-            "This usually means the API key's project does not have access to that model or capability.",
-            "Check OPENAI_API_KEY and confirm the configured model names are available to that project.",
+            f"OpenAI access failed for {label} using model '{model}'.",
         ]
+        if isinstance(exc, AuthenticationError):
+            hints.extend(
+                [
+                    "The API key is missing required permissions for this request.",
+                    "If you are using a restricted API key, make sure it includes the 'model.request' scope.",
+                    "Also confirm your organization/project role allows model inference.",
+                ]
+            )
+        else:
+            hints.extend(
+                [
+                    "This usually means the API key's project does not have access to that model or capability.",
+                    "Check OPENAI_API_KEY and confirm the configured model names are available to that project.",
+                ]
+            )
         if model.lower().startswith("gpt-5"):
             hints.append(
                 "The current .env uses a GPT-5 family judge by default; if your project lacks GPT-5 access, set JUDGE_MODEL to a model you do have, such as gpt-4.1-mini-2025-04-14."
@@ -267,8 +280,8 @@ class OpenAITextClient:
 
         try:
             response = self._client.responses.create(**request_kwargs)
-        except PermissionDeniedError as exc:
-            self._raise_permission_denied(label=label, model=model, exc=exc)
+        except (AuthenticationError, PermissionDeniedError) as exc:
+            self._raise_access_error(label=label, model=model, exc=exc)
         elapsed = time.perf_counter() - start
         output_text = response.output_text.strip()
         self._log(
@@ -316,8 +329,8 @@ class OpenAITextClient:
 
         try:
             response = await self._async_client.responses.create(**request_kwargs)
-        except PermissionDeniedError as exc:
-            self._raise_permission_denied(label=label, model=model, exc=exc)
+        except (AuthenticationError, PermissionDeniedError) as exc:
+            self._raise_access_error(label=label, model=model, exc=exc)
         elapsed = time.perf_counter() - start
         output_text = response.output_text.strip()
         self._log(
@@ -364,8 +377,8 @@ class OpenAITextClient:
             start = time.perf_counter()
             try:
                 response = self._client.responses.parse(**request_kwargs, text_format=response_model)
-            except PermissionDeniedError as exc:
-                self._raise_permission_denied(label=label, model=model, exc=exc)
+            except (AuthenticationError, PermissionDeniedError) as exc:
+                self._raise_access_error(label=label, model=model, exc=exc)
             except ValidationError as exc:
                 elapsed = time.perf_counter() - start
                 raw_text = _validation_error_input_text(exc)
@@ -480,8 +493,8 @@ class OpenAITextClient:
                     **request_kwargs,
                     text_format=response_model,
                 )
-            except PermissionDeniedError as exc:
-                self._raise_permission_denied(label=label, model=model, exc=exc)
+            except (AuthenticationError, PermissionDeniedError) as exc:
+                self._raise_access_error(label=label, model=model, exc=exc)
             except ValidationError as exc:
                 elapsed = time.perf_counter() - start
                 raw_text = _validation_error_input_text(exc)

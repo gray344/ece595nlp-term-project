@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from src.act_selector import aselect_act
 from src.baselines import agenerate_direct_baseline, agenerate_pedagogical_baseline
@@ -25,6 +27,33 @@ from src.reporting import (
     write_markdown_table,
 )
 from src.response_generator import agenerate_act_conditioned_response
+
+SYSTEM_PRIORITY = {
+    "direct": 0,
+    "pedagogical": 1,
+    "act_conditioned": 2,
+}
+
+
+class PartialRunError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        system_name: str,
+        repetition_index: int,
+        partial_records: list[dict],
+        original_error: BaseException,
+    ) -> None:
+        self.system_name = system_name
+        self.repetition_index = repetition_index
+        self.partial_records = partial_records
+        self.original_error = original_error
+        message = (
+            f"{system_name} failed during repetition {repetition_index} after saving "
+            f"{len(partial_records)} completed record(s). "
+            f"Original error: {type(original_error).__name__}: {original_error}"
+        )
+        super().__init__(message)
 
 
 def print_rule(char: str = "=", width: int = 80) -> None:
@@ -107,6 +136,163 @@ def print_record_summary(record: dict) -> None:
     print(f"  judge_reason  : {preview(judgment.get('reasoning'), 260)}", flush=True)
     print(f"  judge_summary : {preview(judgment.get('summary'), 220)}", flush=True)
     print_rule("-")
+
+
+def record_sort_key(record: dict) -> tuple[int, int, str, str]:
+    return (
+        SYSTEM_PRIORITY.get(str(record.get("system", "")), len(SYSTEM_PRIORITY)),
+        int(record.get("repetition_index", 0) or 0),
+        str(record.get("scenario_id", "")),
+        str(record.get("timestamp", "")),
+    )
+
+
+def record_identity_key(record: dict) -> tuple[str, str, int, str, str]:
+    return (
+        str(record.get("run_id", "")),
+        str(record.get("system", "")),
+        int(record.get("repetition_index", 0) or 0),
+        str(record.get("scenario_id", "")),
+        str(record.get("timestamp", "")),
+    )
+
+
+def merge_records(*record_groups: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str, int, str, str]] = set()
+    for group in record_groups:
+        for record in group:
+            key = record_identity_key(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(record)
+    return merged
+
+
+def load_jsonl_if_exists(path: str | Path) -> list[dict]:
+    target = Path(path)
+    if not target.exists():
+        return []
+    return load_jsonl(target)
+
+
+def initialize_run_output_files(*, output_dir: Path, run_dir: Path, systems: list[str]) -> None:
+    save_jsonl(output_dir / "all_results.jsonl", [])
+    save_jsonl(run_dir / "all_results.jsonl", [])
+    for system_name in systems:
+        save_jsonl(output_dir / f"{system_name}_results.jsonl", [])
+        save_jsonl(run_dir / f"{system_name}_results.jsonl", [])
+
+
+def checkpoint_record(*, record: dict, output_dir: Path, run_dir: Path) -> None:
+    system_name = str(record["system"])
+    append_jsonl(output_dir / f"{system_name}_results.jsonl", [record])
+    append_jsonl(run_dir / f"{system_name}_results.jsonl", [record])
+    append_jsonl(output_dir / "all_results.jsonl", [record])
+    append_jsonl(run_dir / "all_results.jsonl", [record])
+
+
+def build_run_manifest_entry(
+    *,
+    run_id: str,
+    run_label: str,
+    systems: list[str],
+    scenario_count: int,
+    repetitions: int,
+    config,
+    total_records: int,
+    status: str,
+    error: BaseException | None,
+) -> dict:
+    payload = {
+        "run_id": run_id,
+        "run_label": run_label,
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "systems": systems,
+        "scenario_count": scenario_count,
+        "repetitions": repetitions,
+        "planned_records": scenario_count * repetitions * len(systems),
+        "total_records": total_records,
+        "status": status,
+        "scenario_path": config.scenario_path,
+        "generation_model": config.generation_model,
+        "act_selection_model": config.act_selection_model,
+        "judge_model": config.judge_model,
+        "include_student_state": config.include_student_state,
+        "temperature": config.temperature,
+        "max_output_tokens": config.max_output_tokens,
+        "judge_max_output_tokens": config.judge_max_output_tokens,
+    }
+    if error is not None:
+        payload["error_type"] = type(error).__name__
+        payload["error_message"] = str(error)
+    return payload
+
+
+def finalize_run_outputs(
+    *,
+    all_records: list[dict],
+    systems: list[str],
+    output_dir: Path,
+    run_dir: Path,
+    history_dir: Path,
+    manifest_entry: dict,
+    append_history: bool,
+) -> dict[str, Path]:
+    ordered_all_records = sorted(all_records, key=record_sort_key)
+    save_jsonl(output_dir / "all_results.jsonl", ordered_all_records)
+    save_jsonl(run_dir / "all_results.jsonl", ordered_all_records)
+    for system_name in systems:
+        system_records = [record for record in ordered_all_records if record.get("system") == system_name]
+        save_jsonl(output_dir / f"{system_name}_results.jsonl", system_records)
+        save_jsonl(run_dir / f"{system_name}_results.jsonl", system_records)
+
+    report_path = write_markdown_report(ordered_all_records, output_dir / "summary.md")
+    run_report_path = write_markdown_report(ordered_all_records, run_dir / "summary.md")
+    markdown_table_path = write_markdown_table(ordered_all_records, output_dir / "scenario_results_table.md")
+    run_markdown_table_path = write_markdown_table(
+        ordered_all_records,
+        run_dir / "scenario_results_table.md",
+    )
+    csv_table_path = write_csv_table(ordered_all_records, output_dir / "scenario_results_table.csv")
+    run_csv_table_path = write_csv_table(ordered_all_records, run_dir / "scenario_results_table.csv")
+    difficulty_csv_path = write_difficulty_summary_csv(
+        ordered_all_records,
+        output_dir / "difficulty_summary.csv",
+    )
+    run_difficulty_csv_path = write_difficulty_summary_csv(
+        ordered_all_records,
+        run_dir / "difficulty_summary.csv",
+    )
+
+    history_path = history_dir / "all_results_history.jsonl"
+    if append_history and ordered_all_records:
+        append_jsonl(history_path, ordered_all_records)
+    history_records = load_jsonl_if_exists(history_path)
+    history_csv_path = write_csv_table(history_records, history_dir / "all_results_history.csv")
+    coverage_csv_path = write_coverage_csv(history_records, history_dir / "coverage.csv")
+
+    manifest_path = history_dir / "run_manifest.jsonl"
+    append_jsonl(manifest_path, [manifest_entry])
+    run_manifest_path = run_dir / "run_manifest.json"
+    run_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    run_manifest_path.write_text(json.dumps(manifest_entry, indent=2) + "\n", encoding="utf-8")
+
+    return {
+        "report_path": report_path,
+        "run_report_path": run_report_path,
+        "markdown_table_path": markdown_table_path,
+        "run_markdown_table_path": run_markdown_table_path,
+        "csv_table_path": csv_table_path,
+        "run_csv_table_path": run_csv_table_path,
+        "difficulty_csv_path": difficulty_csv_path,
+        "run_difficulty_csv_path": run_difficulty_csv_path,
+        "history_csv_path": history_csv_path,
+        "coverage_csv_path": coverage_csv_path,
+        "manifest_path": manifest_path,
+        "run_manifest_path": run_manifest_path,
+    }
 
 
 async def run_single_system(
@@ -236,6 +422,7 @@ async def run_system_records(
     run_label: str,
     repetition_index: int,
     repetitions: int,
+    on_record: Callable[[dict], None] | None = None,
 ) -> list[dict]:
     concurrency = max(1, config.max_concurrency)
     semaphore = asyncio.Semaphore(concurrency)
@@ -264,20 +451,63 @@ async def run_system_records(
                 print_record_summary(record)
             return index, record
 
-    if concurrency == 1:
-        ordered_records: list[dict] = []
-        for index, scenario in enumerate(scenarios, start=1):
-            _, record = await worker(index, scenario)
-            ordered_records.append(record)
-        return ordered_records
+    indexed_records: list[tuple[int, dict]] = []
+    scenario_iter = iter(enumerate(scenarios, start=1))
+    pending: set[asyncio.Task] = set()
+    task_metadata: dict[asyncio.Task, tuple[int, Scenario]] = {}
+    first_error: BaseException | None = None
 
-    tasks = [
-        asyncio.create_task(worker(index, scenario))
-        for index, scenario in enumerate(scenarios, start=1)
-    ]
-    indexed_records = await asyncio.gather(*tasks)
+    def schedule(index: int, scenario: Scenario) -> None:
+        task = asyncio.create_task(worker(index, scenario))
+        pending.add(task)
+        task_metadata[task] = (index, scenario)
+
+    for _ in range(min(concurrency, len(scenarios))):
+        try:
+            next_index, next_scenario = next(scenario_iter)
+        except StopIteration:
+            break
+        schedule(next_index, next_scenario)
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            index, scenario = task_metadata.pop(task)
+            try:
+                _, record = await task
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                    print(
+                        f"Error in {system_name} repetition {repetition_index} on {scenario.scenario_id}: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                continue
+            indexed_records.append((index, record))
+            if on_record is not None:
+                on_record(record)
+
+        if first_error is not None:
+            continue
+
+        while len(pending) < concurrency:
+            try:
+                next_index, next_scenario = next(scenario_iter)
+            except StopIteration:
+                break
+            schedule(next_index, next_scenario)
+
     indexed_records.sort(key=lambda item: item[0])
-    return [record for _, record in indexed_records]
+    ordered_records = [record for _, record in indexed_records]
+    if first_error is not None:
+        raise PartialRunError(
+            system_name=system_name,
+            repetition_index=repetition_index,
+            partial_records=ordered_records,
+            original_error=first_error,
+        ) from first_error
+    return ordered_records
 
 
 async def amain() -> None:
@@ -311,7 +541,9 @@ async def amain() -> None:
     run_dir = output_dir / "runs" / run_id
     history_dir = output_dir / "history"
     output_dir.mkdir(parents=True, exist_ok=True)
+    history_dir.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
+    initialize_run_output_files(output_dir=output_dir, run_dir=run_dir, systems=args.systems)
     print_run_header(
         run_id=run_id,
         run_label=run_label,
@@ -328,86 +560,116 @@ async def amain() -> None:
         print_rule()
 
     all_records: list[dict] = []
-    for system_name in args.systems:
-        print_system_header(system_name, len(scenarios) * repetitions)
-        system_records: list[dict] = []
-        for repetition_index in range(1, repetitions + 1):
-            if repetitions > 1:
-                print(f"Repetition {repetition_index}/{repetitions}", flush=True)
-            repetition_records = await run_system_records(
-                system_name=system_name,
-                scenarios=scenarios,
-                client=client,
-                config=config,
-                run_id=run_id,
-                run_label=run_label,
-                repetition_index=repetition_index,
-                repetitions=repetitions,
-            )
-            system_records.extend(repetition_records)
-        save_jsonl(output_dir / f"{system_name}_results.jsonl", system_records)
-        save_jsonl(run_dir / f"{system_name}_results.jsonl", system_records)
-        summary = aggregate(system_records)
-        print("Summary", flush=True)
-        for line in system_summary_lines({system_name: summary}):
-            print(f"  {line}", flush=True)
-        print_rule("-")
-        all_records.extend(system_records)
+    run_error: BaseException | None = None
+    finalized_paths: dict[str, Path] = {}
+    current_system_name = ""
+    current_repetition_index = 0
 
-    save_jsonl(output_dir / "all_results.jsonl", all_records)
-    save_jsonl(run_dir / "all_results.jsonl", all_records)
-    append_jsonl(history_dir / "all_results_history.jsonl", all_records)
-    append_jsonl(
-        history_dir / "run_manifest.jsonl",
-        [
-            {
-                "run_id": run_id,
-                "run_label": run_label,
-                "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                "systems": args.systems,
-                "scenario_count": len(scenarios),
-                "repetitions": repetitions,
-                "total_records": len(all_records),
-                "scenario_path": config.scenario_path,
-                "generation_model": config.generation_model,
-                "act_selection_model": config.act_selection_model,
-                "judge_model": config.judge_model,
-                "include_student_state": config.include_student_state,
-                "temperature": config.temperature,
-                "max_output_tokens": config.max_output_tokens,
-                "judge_max_output_tokens": config.judge_max_output_tokens,
-            }
-        ],
+    try:
+        for system_name in args.systems:
+            current_system_name = system_name
+            print_system_header(system_name, len(scenarios) * repetitions)
+            system_records: list[dict] = [
+                record for record in all_records if record.get("system") == system_name
+            ]
+            for repetition_index in range(1, repetitions + 1):
+                current_repetition_index = repetition_index
+                if repetitions > 1:
+                    print(f"Repetition {repetition_index}/{repetitions}", flush=True)
+                try:
+                    repetition_records = await run_system_records(
+                        system_name=system_name,
+                        scenarios=scenarios,
+                        client=client,
+                        config=config,
+                        run_id=run_id,
+                        run_label=run_label,
+                        repetition_index=repetition_index,
+                        repetitions=repetitions,
+                        on_record=lambda record, output_dir=output_dir, run_dir=run_dir: checkpoint_record(
+                            record=record,
+                            output_dir=output_dir,
+                            run_dir=run_dir,
+                        ),
+                    )
+                except PartialRunError as exc:
+                    system_records.extend(exc.partial_records)
+                    all_records.extend(exc.partial_records)
+                    run_error = exc.original_error
+                    print(exc, flush=True)
+                    print("No new scenarios will be scheduled for this run; finalized outputs will be written.", flush=True)
+                    print_rule("-")
+                    break
+                system_records.extend(repetition_records)
+                all_records.extend(repetition_records)
+
+            if system_records:
+                summary = aggregate(system_records)
+                label = "Partial Summary" if run_error is not None else "Summary"
+                print(label, flush=True)
+                for line in system_summary_lines({system_name: summary}):
+                    print(f"  {line}", flush=True)
+                print_rule("-")
+            else:
+                print("No completed records for this system.", flush=True)
+                print_rule("-")
+
+            if run_error is not None:
+                break
+    except BaseException as exc:
+        run_error = exc
+
+    checkpointed_records = load_jsonl_if_exists(run_dir / "all_results.jsonl")
+    all_records = merge_records(all_records, checkpointed_records)
+    manifest_entry = build_run_manifest_entry(
+        run_id=run_id,
+        run_label=run_label,
+        systems=args.systems,
+        scenario_count=len(scenarios),
+        repetitions=repetitions,
+        config=config,
+        total_records=len(all_records),
+        status="failed" if run_error is not None else "completed",
+        error=run_error,
     )
-    report_path = write_markdown_report(all_records, output_dir / "summary.md")
-    run_report_path = write_markdown_report(all_records, run_dir / "summary.md")
-    markdown_table_path = write_markdown_table(all_records, output_dir / "scenario_results_table.md")
-    run_markdown_table_path = write_markdown_table(all_records, run_dir / "scenario_results_table.md")
-    csv_table_path = write_csv_table(all_records, output_dir / "scenario_results_table.csv")
-    run_csv_table_path = write_csv_table(all_records, run_dir / "scenario_results_table.csv")
-    difficulty_csv_path = write_difficulty_summary_csv(all_records, output_dir / "difficulty_summary.csv")
-    run_difficulty_csv_path = write_difficulty_summary_csv(all_records, run_dir / "difficulty_summary.csv")
-    history_records = load_jsonl(history_dir / "all_results_history.jsonl")
-    history_csv_path = write_csv_table(history_records, history_dir / "all_results_history.csv")
-    coverage_csv_path = write_coverage_csv(history_records, history_dir / "coverage.csv")
-    manifest_path = history_dir / "run_manifest.jsonl"
+    finalized_paths = finalize_run_outputs(
+        all_records=all_records,
+        systems=args.systems,
+        output_dir=output_dir,
+        run_dir=run_dir,
+        history_dir=history_dir,
+        manifest_entry=manifest_entry,
+        append_history=run_error is None,
+    )
+
     system_summaries = summarize_by_system(all_records)
     print("Final Summary", flush=True)
     print_rule()
     for line in system_summary_lines(system_summaries):
         print(line, flush=True)
     print_rule()
-    print(f"Saved report: {report_path}", flush=True)
-    print(f"Saved run report: {run_report_path}", flush=True)
-    print(f"Saved markdown table: {markdown_table_path}", flush=True)
-    print(f"Saved run markdown table: {run_markdown_table_path}", flush=True)
-    print(f"Saved csv table: {csv_table_path}", flush=True)
-    print(f"Saved run csv table: {run_csv_table_path}", flush=True)
-    print(f"Saved difficulty csv: {difficulty_csv_path}", flush=True)
-    print(f"Saved run difficulty csv: {run_difficulty_csv_path}", flush=True)
-    print(f"Saved cumulative history csv: {history_csv_path}", flush=True)
-    print(f"Saved coverage csv: {coverage_csv_path}", flush=True)
-    print(f"Saved run manifest: {manifest_path}", flush=True)
+    print(f"Run status  : {manifest_entry['status']}", flush=True)
+    print(f"Saved report: {finalized_paths['report_path']}", flush=True)
+    print(f"Saved run report: {finalized_paths['run_report_path']}", flush=True)
+    print(f"Saved markdown table: {finalized_paths['markdown_table_path']}", flush=True)
+    print(f"Saved run markdown table: {finalized_paths['run_markdown_table_path']}", flush=True)
+    print(f"Saved csv table: {finalized_paths['csv_table_path']}", flush=True)
+    print(f"Saved run csv table: {finalized_paths['run_csv_table_path']}", flush=True)
+    print(f"Saved difficulty csv: {finalized_paths['difficulty_csv_path']}", flush=True)
+    print(f"Saved run difficulty csv: {finalized_paths['run_difficulty_csv_path']}", flush=True)
+    print(f"Saved cumulative history csv: {finalized_paths['history_csv_path']}", flush=True)
+    print(f"Saved coverage csv: {finalized_paths['coverage_csv_path']}", flush=True)
+    print(f"Saved history manifest: {finalized_paths['manifest_path']}", flush=True)
+    print(f"Saved run manifest: {finalized_paths['run_manifest_path']}", flush=True)
+    if run_error is not None:
+        print(
+            f"Run stopped while processing system={current_system_name or '-'} "
+            f"repetition={current_repetition_index or '-'} "
+            f"after salvaging {len(all_records)} completed record(s).",
+            flush=True,
+        )
+        print("Partial run records were not appended to cumulative history.", flush=True)
+        raise run_error
 
 
 def main() -> None:
