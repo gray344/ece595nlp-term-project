@@ -11,7 +11,11 @@ def generate_direct_baseline(
     scenario: Scenario,
     config: PipelineConfig,
 ) -> str:
-    system_prompt, user_prompt = build_baseline_prompt(scenario, pedagogical=False)
+    system_prompt, user_prompt = build_baseline_prompt(
+        scenario,
+        pedagogical=False,
+        include_student_state=config.include_student_state,
+    )
     return client.complete_text(
         model=config.generation_model,
         system_prompt=system_prompt,
@@ -27,7 +31,11 @@ async def agenerate_direct_baseline(
     scenario: Scenario,
     config: PipelineConfig,
 ) -> str:
-    system_prompt, user_prompt = build_baseline_prompt(scenario, pedagogical=False)
+    system_prompt, user_prompt = build_baseline_prompt(
+        scenario,
+        pedagogical=False,
+        include_student_state=config.include_student_state,
+    )
     return await client.acomplete_text(
         model=config.generation_model,
         system_prompt=system_prompt,
@@ -43,7 +51,11 @@ def generate_pedagogical_baseline(
     scenario: Scenario,
     config: PipelineConfig,
 ) -> str:
-    system_prompt, user_prompt = build_baseline_prompt(scenario, pedagogical=True)
+    system_prompt, user_prompt = build_baseline_prompt(
+        scenario,
+        pedagogical=True,
+        include_student_state=config.include_student_state,
+    )
     return client.complete_text(
         model=config.generation_model,
         system_prompt=system_prompt,
@@ -59,7 +71,11 @@ async def agenerate_pedagogical_baseline(
     scenario: Scenario,
     config: PipelineConfig,
 ) -> str:
-    system_prompt, user_prompt = build_baseline_prompt(scenario, pedagogical=True)
+    system_prompt, user_prompt = build_baseline_prompt(
+        scenario,
+        pedagogical=True,
+        include_student_state=config.include_student_state,
+    )
     return await client.acomplete_text(
         model=config.generation_model,
         system_prompt=system_prompt,

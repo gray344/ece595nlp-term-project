@@ -41,6 +41,7 @@ def print_run_header(
     output_dir: Path,
     debug: bool,
     concurrency: int,
+    include_student_state: bool,
 ) -> None:
     print_rule()
     print("Tutoring Evaluation Run", flush=True)
@@ -54,6 +55,7 @@ def print_run_header(
     print(f"Output dir : {output_dir}", flush=True)
     print(f"Concurrency: {concurrency}", flush=True)
     print(f"Debug      : {'on' if debug else 'off'}", flush=True)
+    print(f"State input: {'on' if include_student_state else 'off'}", flush=True)
     print_rule()
 
 
@@ -127,7 +129,12 @@ async def run_single_system(
         act_result = await aselect_act(client, scenario, config)
         selected_act = act_result["selected_act"]
         rationale = act_result["rationale"]
-        response = await agenerate_act_conditioned_response(client, scenario, selected_act, config)
+        response = await agenerate_act_conditioned_response(
+            client,
+            scenario,
+            selected_act,
+            config,
+        )
     else:
         raise ValueError(f"Unknown system: {system_name}")
 
@@ -147,6 +154,7 @@ async def run_single_system(
         "generation_model": config.generation_model,
         "act_selection_model": config.act_selection_model,
         "judge_model": config.judge_model,
+        "student_state_visible_to_tutor": config.include_student_state,
         "system": system_name,
         "scenario_id": scenario.scenario_id,
         "problem": scenario.problem,
@@ -200,6 +208,20 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Maximum number of in-flight scenario evaluations per system. Defaults to MAX_CONCURRENCY from .env.",
     )
+    student_state_group = parser.add_mutually_exclusive_group()
+    student_state_group.add_argument(
+        "--include-student-state",
+        dest="include_student_state",
+        action="store_true",
+        help="Pass the scenario's student_state label to the tutor systems.",
+    )
+    student_state_group.add_argument(
+        "--omit-student-state",
+        dest="include_student_state",
+        action="store_false",
+        help="Do not pass the scenario's student_state label to the tutor systems.",
+    )
+    parser.set_defaults(include_student_state=None)
     return parser.parse_args()
 
 
@@ -267,7 +289,15 @@ async def amain() -> None:
         debug_enabled = False
     concurrency = config.max_concurrency if args.concurrency <= 0 else args.concurrency
     repetitions = config.default_repetitions if args.repetitions <= 0 else args.repetitions
-    config = replace(config, debug_api=debug_enabled, max_concurrency=max(1, concurrency))
+    include_student_state = config.include_student_state
+    if args.include_student_state is not None:
+        include_student_state = bool(args.include_student_state)
+    config = replace(
+        config,
+        debug_api=debug_enabled,
+        max_concurrency=max(1, concurrency),
+        include_student_state=include_student_state,
+    )
 
     scenarios = load_scenarios(config.scenario_path)
     if args.limit > 0:
@@ -290,6 +320,7 @@ async def amain() -> None:
         output_dir=output_dir,
         debug=config.debug_api,
         concurrency=config.max_concurrency,
+        include_student_state=config.include_student_state,
     )
     if config.debug_api and config.max_concurrency > 1:
         print("Note: debug output may interleave when concurrency is greater than 1.", flush=True)
@@ -340,6 +371,7 @@ async def amain() -> None:
                 "generation_model": config.generation_model,
                 "act_selection_model": config.act_selection_model,
                 "judge_model": config.judge_model,
+                "include_student_state": config.include_student_state,
                 "temperature": config.temperature,
                 "max_output_tokens": config.max_output_tokens,
                 "judge_max_output_tokens": config.judge_max_output_tokens,

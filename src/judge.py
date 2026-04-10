@@ -20,7 +20,7 @@ class Judgment:
     summary: str
 
     @property
-    def pedagogy_mean(self) -> float:
+    def pedagogy_raw_mean(self) -> float:
         scores = [
             self.correctness,
             self.scaffolding,
@@ -30,10 +30,42 @@ class Judgment:
         ]
         return sum(scores) / len(scores)
 
+    @property
+    def pedagogy_mean(self) -> float:
+        raw_mean = self.pedagogy_raw_mean
+        if self.leakage == 1:
+            return min(raw_mean, 3.5)
+        return raw_mean
+
     def to_dict(self) -> dict:
         payload = asdict(self)
+        payload["pedagogy_raw_mean"] = self.pedagogy_raw_mean
         payload["pedagogy_mean"] = self.pedagogy_mean
         return payload
+
+
+def _build_judgment(result: dict) -> Judgment:
+    leakage = int(result.get("leakage", 0))
+    correctness = int(result.get("correctness", 3))
+    scaffolding = int(result.get("scaffolding", 3))
+    self_correction_support = int(result.get("self_correction_support", 3))
+    non_overload = int(result.get("non_overload", 3))
+    tone = int(result.get("tone", 3))
+
+    if leakage == 1:
+        scaffolding = min(scaffolding, 3)
+        self_correction_support = min(self_correction_support, 3)
+
+    return Judgment(
+        leakage=leakage,
+        correctness=correctness,
+        scaffolding=scaffolding,
+        self_correction_support=self_correction_support,
+        non_overload=non_overload,
+        tone=tone,
+        reasoning=str(result.get("reasoning", result.get("summary", ""))).strip(),
+        summary=str(result.get("summary", "")).strip(),
+    )
 
 
 def judge_response(
@@ -59,16 +91,7 @@ def judge_response(
         reasoning_summary=config.judge_reasoning_summary,
         response_model=JudgeResponseOutput,
     )
-    return Judgment(
-        leakage=int(result.get("leakage", 0)),
-        correctness=int(result.get("correctness", 3)),
-        scaffolding=int(result.get("scaffolding", 3)),
-        self_correction_support=int(result.get("self_correction_support", 3)),
-        non_overload=int(result.get("non_overload", 3)),
-        tone=int(result.get("tone", 3)),
-        reasoning=str(result.get("reasoning", result.get("summary", ""))).strip(),
-        summary=str(result.get("summary", "")).strip(),
-    )
+    return _build_judgment(result)
 
 
 async def ajudge_response(
@@ -94,13 +117,4 @@ async def ajudge_response(
         reasoning_summary=config.judge_reasoning_summary,
         response_model=JudgeResponseOutput,
     )
-    return Judgment(
-        leakage=int(result.get("leakage", 0)),
-        correctness=int(result.get("correctness", 3)),
-        scaffolding=int(result.get("scaffolding", 3)),
-        self_correction_support=int(result.get("self_correction_support", 3)),
-        non_overload=int(result.get("non_overload", 3)),
-        tone=int(result.get("tone", 3)),
-        reasoning=str(result.get("reasoning", result.get("summary", ""))).strip(),
-        summary=str(result.get("summary", "")).strip(),
-    )
+    return _build_judgment(result)

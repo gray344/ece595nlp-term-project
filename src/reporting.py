@@ -176,6 +176,7 @@ def render_example(record: dict) -> str:
 
 
 def score_bundle_text(judgment: dict) -> str:
+    pedagogy_raw_mean = judgment.get("pedagogy_raw_mean", "")
     return (
         f"leakage={judgment.get('leakage', '')}; "
         f"correctness={judgment.get('correctness', '')}; "
@@ -183,6 +184,7 @@ def score_bundle_text(judgment: dict) -> str:
         f"self_correction_support={judgment.get('self_correction_support', '')}; "
         f"non_overload={judgment.get('non_overload', '')}; "
         f"tone={judgment.get('tone', '')}; "
+        f"pedagogy_raw_mean={pedagogy_raw_mean}; "
         f"pedagogy_mean={judgment.get('pedagogy_mean', '')}"
     )
 
@@ -218,6 +220,7 @@ def table_rows(records: list[dict]) -> list[dict]:
                 "self_correction_support": judgment.get("self_correction_support", ""),
                 "non_overload": judgment.get("non_overload", ""),
                 "tone": judgment.get("tone", ""),
+                "pedagogy_raw_mean": judgment.get("pedagogy_raw_mean", ""),
                 "pedagogy_mean": judgment.get("pedagogy_mean", ""),
             }
         )
@@ -264,6 +267,7 @@ def write_csv_table(records: list[dict], output_path: str | Path) -> Path:
         "self_correction_support",
         "non_overload",
         "tone",
+        "pedagogy_raw_mean",
         "pedagogy_mean",
     ]
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,6 +359,7 @@ def write_markdown_table(records: list[dict], output_path: str | Path) -> Path:
             "self_correction_support": row["self_correction_support"],
             "non_overload": row["non_overload"],
             "tone": row["tone"],
+            "pedagogy_raw_mean": row["pedagogy_raw_mean"],
             "pedagogy_mean": row["pedagogy_mean"],
         }
         cells = [

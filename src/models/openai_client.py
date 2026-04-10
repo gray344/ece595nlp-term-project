@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from src.reporting import preview
 
@@ -27,6 +27,17 @@ def _extract_json_blob(text: str) -> str:
     if first_array != -1 and last_array != -1 and last_array > first_array:
         return stripped[first_array : last_array + 1]
     return stripped
+
+
+def _validation_error_input_text(exc: ValidationError) -> str:
+    try:
+        for error in exc.errors():
+            raw_input = error.get("input")
+            if isinstance(raw_input, str) and raw_input.strip():
+                return raw_input
+    except Exception:
+        return ""
+    return ""
 
 
 class OpenAITextClient:
@@ -174,6 +185,17 @@ class OpenAITextClient:
             f"usage={self._usage_preview(response)}"
         )
 
+    @staticmethod
+    def _recovery_max_output_tokens(max_output_tokens: int) -> int:
+        bumped = max(max_output_tokens + 200, int(max_output_tokens * 1.5))
+        return min(bumped, 1200)
+
+    @staticmethod
+    def _validate_json_text(text: str, response_model: type[BaseModel]) -> dict[str, Any]:
+        json_blob = _extract_json_blob(text)
+        payload = json.loads(json_blob)
+        return response_model.model_validate(payload).model_dump()
+
     def complete_text(
         self,
         *,
@@ -301,7 +323,47 @@ class OpenAITextClient:
                 mode="structured_parse",
             )
             start = time.perf_counter()
-            response = self._client.responses.parse(**request_kwargs, text_format=response_model)
+            try:
+                response = self._client.responses.parse(**request_kwargs, text_format=response_model)
+            except ValidationError as exc:
+                elapsed = time.perf_counter() - start
+                raw_text = _validation_error_input_text(exc)
+                self._log(
+                    f"    API fail  : {label}\n"
+                    f"      elapsed : {elapsed:.2f}s\n"
+                    f"      mode    : structured_parse\n"
+                    f"      error   : {preview(str(exc), 220)}"
+                )
+                if raw_text:
+                    try:
+                        return self._validate_json_text(raw_text, response_model)
+                    except (json.JSONDecodeError, ValidationError):
+                        pass
+
+                retry_tokens = self._recovery_max_output_tokens(max_output_tokens)
+                self._log(
+                    f"      retry   : json_object fallback with max_tokens={retry_tokens}"
+                )
+                text = self.complete_text(
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=temperature,
+                    max_output_tokens=retry_tokens,
+                    label=f"{label}:json_retry",
+                    reasoning_effort=reasoning_effort,
+                    reasoning_summary=reasoning_summary,
+                    text_format={"type": "json_object"},
+                )
+                try:
+                    return self._validate_json_text(text, response_model)
+                except (json.JSONDecodeError, ValidationError) as retry_exc:
+                    preview_text = preview(text, 260) or "<empty response>"
+                    raise ValueError(
+                        f"Structured parse failed for {label}, and json fallback also failed. "
+                        f"Try increasing JUDGE_MAX_OUTPUT_TOKENS or lowering JUDGE_REASONING_EFFORT. "
+                        f"Fallback output preview: {preview_text}"
+                    ) from retry_exc
             elapsed = time.perf_counter() - start
             parsed = getattr(response, "output_parsed", None)
             refusal = getattr(response, "refusal", None)
@@ -372,10 +434,50 @@ class OpenAITextClient:
                 mode="structured_parse_async",
             )
             start = time.perf_counter()
-            response = await self._async_client.responses.parse(
-                **request_kwargs,
-                text_format=response_model,
-            )
+            try:
+                response = await self._async_client.responses.parse(
+                    **request_kwargs,
+                    text_format=response_model,
+                )
+            except ValidationError as exc:
+                elapsed = time.perf_counter() - start
+                raw_text = _validation_error_input_text(exc)
+                self._log(
+                    f"    API fail  : {label}\n"
+                    f"      elapsed : {elapsed:.2f}s\n"
+                    f"      mode    : structured_parse_async\n"
+                    f"      error   : {preview(str(exc), 220)}"
+                )
+                if raw_text:
+                    try:
+                        return self._validate_json_text(raw_text, response_model)
+                    except (json.JSONDecodeError, ValidationError):
+                        pass
+
+                retry_tokens = self._recovery_max_output_tokens(max_output_tokens)
+                self._log(
+                    f"      retry   : json_object fallback with max_tokens={retry_tokens}"
+                )
+                text = await self.acomplete_text(
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=temperature,
+                    max_output_tokens=retry_tokens,
+                    label=f"{label}:json_retry",
+                    reasoning_effort=reasoning_effort,
+                    reasoning_summary=reasoning_summary,
+                    text_format={"type": "json_object"},
+                )
+                try:
+                    return self._validate_json_text(text, response_model)
+                except (json.JSONDecodeError, ValidationError) as retry_exc:
+                    preview_text = preview(text, 260) or "<empty response>"
+                    raise ValueError(
+                        f"Structured parse failed for {label}, and json fallback also failed. "
+                        f"Try increasing JUDGE_MAX_OUTPUT_TOKENS or lowering JUDGE_REASONING_EFFORT. "
+                        f"Fallback output preview: {preview_text}"
+                    ) from retry_exc
             elapsed = time.perf_counter() - start
             parsed = getattr(response, "output_parsed", None)
             refusal = getattr(response, "refusal", None)

@@ -12,7 +12,11 @@ def generate_act_conditioned_response(
     selected_act: str,
     config: PipelineConfig,
 ) -> str:
-    system_prompt, user_prompt = build_response_prompt(scenario, selected_act)
+    system_prompt, user_prompt = build_response_prompt(
+        scenario,
+        selected_act,
+        include_student_state=config.include_student_state,
+    )
     return client.complete_text(
         model=config.generation_model,
         system_prompt=system_prompt,
@@ -29,7 +33,11 @@ async def agenerate_act_conditioned_response(
     selected_act: str,
     config: PipelineConfig,
 ) -> str:
-    system_prompt, user_prompt = build_response_prompt(scenario, selected_act)
+    system_prompt, user_prompt = build_response_prompt(
+        scenario,
+        selected_act,
+        include_student_state=config.include_student_state,
+    )
     return await client.acomplete_text(
         model=config.generation_model,
         system_prompt=system_prompt,

@@ -7,7 +7,10 @@ from src.prompts import ActSelectionOutput, TUTOR_ACTS, build_act_selection_prom
 
 
 def select_act(client: OpenAITextClient, scenario: Scenario, config: PipelineConfig) -> dict[str, str]:
-    system_prompt, user_prompt = build_act_selection_prompt(scenario)
+    system_prompt, user_prompt = build_act_selection_prompt(
+        scenario,
+        include_student_state=config.include_student_state,
+    )
     result = client.complete_json(
         model=config.act_selection_model,
         system_prompt=system_prompt,
@@ -29,7 +32,10 @@ async def aselect_act(
     scenario: Scenario,
     config: PipelineConfig,
 ) -> dict[str, str]:
-    system_prompt, user_prompt = build_act_selection_prompt(scenario)
+    system_prompt, user_prompt = build_act_selection_prompt(
+        scenario,
+        include_student_state=config.include_student_state,
+    )
     result = await client.acomplete_json(
         model=config.act_selection_model,
         system_prompt=system_prompt,
