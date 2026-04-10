@@ -9,8 +9,11 @@ from src.prompts import (
     TUTOR_ACTS,
     build_act_selection_prompt,
     build_baseline_prompt,
+    build_judge_prompt,
     build_response_prompt,
 )
+
+DEFAULT_JUDGE_RESPONSE = "[Tutor response under evaluation]"
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +45,11 @@ def parse_args() -> argparse.Namespace:
         "--output",
         default="",
         help="Markdown output path. Defaults to a state-aware file under outputs/.",
+    )
+    parser.add_argument(
+        "--judge-response",
+        default=DEFAULT_JUDGE_RESPONSE,
+        help="Tutor response text to embed in the rendered judge prompt.",
     )
     student_state_group = parser.add_mutually_exclusive_group()
     student_state_group.add_argument(
@@ -122,6 +130,7 @@ def build_markdown(
     selected_act: str,
     all_acts: bool,
     scenario_path: str,
+    judge_response: str,
 ) -> str:
     direct_system_prompt, direct_user_prompt = build_baseline_prompt(
         scenario,
@@ -137,6 +146,11 @@ def build_markdown(
         scenario,
         include_student_state=include_student_state,
     )
+    judge_system_prompt, judge_user_prompt = build_judge_prompt(
+        scenario,
+        response=judge_response,
+        include_student_state=include_student_state,
+    )
 
     sections = [
         "# Prompt Snapshot",
@@ -147,6 +161,7 @@ def build_markdown(
         f"- Topic: `{scenario.topic}`",
         f"- Student state visible to tutors: `{'yes' if include_student_state else 'no'}`",
         f"- Act-conditioned response prompt rendered for: `{'all acts' if all_acts else selected_act}`",
+        f"- Judge response placeholder: `{judge_response}`",
         "",
         render_prompt_section("Direct Baseline", direct_system_prompt, direct_user_prompt),
         render_prompt_section(
@@ -158,6 +173,11 @@ def build_markdown(
             "Act Selector",
             selector_system_prompt,
             selector_user_prompt,
+        ),
+        render_prompt_section(
+            "Judge Prompt",
+            judge_system_prompt,
+            judge_user_prompt,
         ),
     ]
     sections.extend(
@@ -198,6 +218,7 @@ def main() -> None:
         selected_act=selected_act,
         all_acts=args.all_acts,
         scenario_path=scenario_path,
+        judge_response=args.judge_response,
     )
 
     output_path = resolve_output_path(args.output, include_student_state)
