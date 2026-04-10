@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any
 
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, OpenAI, PermissionDeniedError
 from pydantic import BaseModel, ValidationError
 
 from src.reporting import preview
@@ -52,6 +52,39 @@ class OpenAITextClient:
     def _log(self, message: str) -> None:
         if self._debug:
             print(message, flush=True)
+
+    @staticmethod
+    def _permission_error_detail(exc: PermissionDeniedError) -> str:
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if message:
+                    return str(message).strip()
+        return str(exc).strip()
+
+    def _raise_permission_denied(
+        self,
+        *,
+        label: str,
+        model: str,
+        exc: PermissionDeniedError,
+    ) -> None:
+        detail = self._permission_error_detail(exc)
+        hints = [
+            f"OpenAI returned HTTP 403 for {label} using model '{model}'.",
+            "This usually means the API key's project does not have access to that model or capability.",
+            "Check OPENAI_API_KEY and confirm the configured model names are available to that project.",
+        ]
+        if model.lower().startswith("gpt-5"):
+            hints.append(
+                "The current .env uses a GPT-5 family judge by default; if your project lacks GPT-5 access, set JUDGE_MODEL to a model you do have, such as gpt-4.1-mini-2025-04-14."
+            )
+        hints.append("Run the pipeline with --debug --concurrency 1 if you need to confirm which call fails first.")
+        if detail:
+            hints.append(f"OpenAI message: {detail}")
+        raise PermissionError(" ".join(hints)) from exc
 
     @staticmethod
     def _usage_preview(response: Any) -> str:
@@ -232,7 +265,10 @@ class OpenAITextClient:
         if text_format is not None:
             request_kwargs["text"] = {"format": text_format}
 
-        response = self._client.responses.create(**request_kwargs)
+        try:
+            response = self._client.responses.create(**request_kwargs)
+        except PermissionDeniedError as exc:
+            self._raise_permission_denied(label=label, model=model, exc=exc)
         elapsed = time.perf_counter() - start
         output_text = response.output_text.strip()
         self._log(
@@ -278,7 +314,10 @@ class OpenAITextClient:
         if text_format is not None:
             request_kwargs["text"] = {"format": text_format}
 
-        response = await self._async_client.responses.create(**request_kwargs)
+        try:
+            response = await self._async_client.responses.create(**request_kwargs)
+        except PermissionDeniedError as exc:
+            self._raise_permission_denied(label=label, model=model, exc=exc)
         elapsed = time.perf_counter() - start
         output_text = response.output_text.strip()
         self._log(
@@ -325,6 +364,8 @@ class OpenAITextClient:
             start = time.perf_counter()
             try:
                 response = self._client.responses.parse(**request_kwargs, text_format=response_model)
+            except PermissionDeniedError as exc:
+                self._raise_permission_denied(label=label, model=model, exc=exc)
             except ValidationError as exc:
                 elapsed = time.perf_counter() - start
                 raw_text = _validation_error_input_text(exc)
@@ -439,6 +480,8 @@ class OpenAITextClient:
                     **request_kwargs,
                     text_format=response_model,
                 )
+            except PermissionDeniedError as exc:
+                self._raise_permission_denied(label=label, model=model, exc=exc)
             except ValidationError as exc:
                 elapsed = time.perf_counter() - start
                 raw_text = _validation_error_input_text(exc)
